@@ -1,0 +1,37 @@
+---
+# Copyright 2017, Rackspace US, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+craton_db_name: craton
+craton_db_user: craton
+
+## System info
+craton_system_user_name: craton
+craton_system_group_name: craton
+craton_system_additional_groups:
+  - ssl_cert
+
+craton_system_shell: /bin/bash
+craton_system_comment: craton system user
+craton_system_user_home: "/var/lib/{{ craton_system_user_name }}"
+
+craton_keystone_auth_plugin: password
+craton_service_region: RegionOne
+craton_service_project_name: "service"
+craton_service_project_domain_id: default
+craton_service_user_domain_id: default
+craton_service_user_name: "craton"
+craton_service_role_name: "admin"
+
+craton_package_state: latest

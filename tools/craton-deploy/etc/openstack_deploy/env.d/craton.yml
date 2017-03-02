@@ -1,0 +1,22 @@
+---
+component_skel:
+  craton_api:
+    belongs_to:
+    - craton_all
+
+container_skel:
+  craton_container:
+    belongs_to:
+      - inventory_containers
+    contains:
+      - craton_api
+    properties:
+      service_name: craton
+
+physical_skel:
+  inventory_containers:
+    belongs_to:
+    - all_containers
+  inventory_hosts:
+    belongs_to:
+    - hosts

@@ -1,0 +1,239 @@
+---
+# Copyright 2017, Rackspace US, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+- name: Add craton haproxy config
+  hosts: haproxy
+  gather_facts: true
+  roles:
+    - role: "haproxy_server"
+      haproxy_service_configs:
+        - service:
+            haproxy_service_name: craton
+            haproxy_backend_nodes: "{{ groups['craton_all'] | default([]) }}"
+            haproxy_ssl: "{{ haproxy_ssl }}"
+            haproxy_port: 7780
+            haproxy_balance_type: tcp
+            haproxy_backend_options:
+              - tcp-check
+
+- name: Create craton DB
+  hosts: "galera_all[0]"
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Create DB for service
+      mysql_db:
+        login_user: "{{ galera_root_user }}"
+        login_password: "{{ galera_root_password }}"
+        login_host: "127.0.0.1"
+        name: "{{ craton_db_name }}"
+        state: "present"
+
+    - name: Grant access to the DB for the service
+      mysql_user:
+        login_user: "{{ galera_root_user }}"
+        login_password: "{{ galera_root_password }}"
+        login_host: "127.0.0.1"
+        name: "{{ craton_db_user }}"
+        password: "{{ craton_db_password }}"
+        host: "{{ item }}"
+        state: "present"
+        priv: "{{ craton_db_name }}.*:ALL"
+      with_items:
+        - "localhost"
+        - "%"
+
+- name: Gather lxc container host facts
+  hosts: "{{ lxc_host_group | default('lxc_hosts')}}"
+  gather_facts: "{{ gather_facts | default(True) }}"
+
+- name: Create craton container(s)
+  hosts: "craton_all"
+  gather_facts: false
+  user: root
+  roles:
+    - role: "lxc_container_create"
+
+- name: Install craton
+  hosts: "craton_all"
+  gather_facts: true
+  vars_files:
+    - vars.yml
+  roles:
+    - role: "galera_client"
+    - role: "pip_install"
+  post_tasks:
+    - name: create the system group
+      group:
+        name: "{{ craton_system_group_name }}"
+        state: "present"
+        system: "yes"
+
+    - name: create additional groups
+      group:
+        name: "{{ item }}"
+        state: "present"
+        system: "yes"
+      with_items: "{{ craton_system_additional_groups }}"
+
+    - name: Create the craton system user
+      user:
+        name: "{{ craton_system_user_name }}"
+        group: "{{ craton_system_group_name }}"
+        groups: "{{ craton_system_additional_groups | join(',') }}"
+        comment: "{{ craton_system_comment }}"
+        shell: "{{ craton_system_shell }}"
+        system: "yes"
+        createhome: "yes"
+        home: "{{ craton_system_user_home }}"
+        generate_ssh_key: "yes"
+
+    - name: Create craton dir
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner|default(craton_system_user_name) }}"
+        group: "{{ item.group|default(craton_system_group_name) }}"
+        mode: "{{ item.mode|default(0755) }}"
+      with_items:
+        - { path: "/openstack", mode: "0755", owner: "root", group: "root" }
+        - { path: "/etc/craton", mode: "0750" }
+        - { path: "{{ craton_system_user_home }}" }
+
+    - name: Test for log directory or link
+      shell: |
+        if [ -h "/var/log/craton"  ]; then
+          chown -h {{ craton_system_user_name }}:{{ craton_system_group_name }} "/var/log/craton"
+          chown -R {{ craton_system_user_name }}:{{ craton_system_group_name }} "$(readlink /var/log/craton)"
+        else
+          exit 1
+        fi
+      register: log_dir
+      failed_when: false
+      changed_when: log_dir.rc != 0
+
+    - name: Create craton log dir
+      file:
+        path: "/var/log/craton"
+        state: directory
+        owner: "{{ craton_system_user_name }}"
+        group: "{{ craton_system_group_name }}"
+        mode: "0755"
+      when: log_dir.rc != 0
+
+    - name: Install distro packages
+      package:
+        name: "{{ item }}"
+        state: "{{ craton_package_state }}"
+      register: install_packages
+      until: install_packages|success
+      retries: 5
+      delay: 2
+      with_items:
+        - python3-all
+
+    - name: Install pip3
+      command: "/usr/bin/python3 /opt/get-pip.py"
+      args:
+        creates: "/usr/local/bin/pip3"
+
+    - name: install pip3 root packages
+      command: "pip3 install {{ item }}"
+      with_items:
+        - virtualenv
+
+    - name: create craton config
+      copy:
+        content: |
+          [database]
+          connection = mysql+pymysql://craton:craton@localhost/craton
+          [keystone_authtoken]
+          insecure = {{ keystone_service_internaluri_insecure | bool }}
+          auth_type = {{ craton_keystone_auth_plugin }}
+          auth_url = {{ keystone_service_adminuri }}
+          auth_uri = {{ keystone_service_internaluri }}
+          project_domain_id = {{ craton_service_project_domain_id }}
+          user_domain_id = {{ craton_service_user_domain_id }}
+          project_name = {{ craton_service_project_name }}
+          username = {{ craton_service_user_name }}
+          password = {{ craton_service_password }}
+          region_name = {{ keystone_service_region }}
+        dest: /etc/craton/craton-api-conf
+
+    - name: create craton paste config
+      copy:
+        content: |
+          [pipeline:local-auth]
+          pipeline = request_id localauthcontext api_v1
+          [pipeline:keystone-auth]
+          pipeline = request_id authtoken keystonecontext api_v1
+          [app:api_v1]
+          paste.app_factory = craton.api:create_app
+          [filter:noauthcontext]
+          paste.filter_factory = craton.api.middleware:NoAuthContextMiddleware.factory
+          [filter:localauthcontext]
+          paste.filter_factory = craton.api.middleware:LocalAuthContextMiddleware.factory
+          [filter:authtoken]
+          paste.filter_factory = keystonemiddleware.auth_token:filter_factory
+          delay_auth_decision = true
+          [filter:keystonecontext]
+          paste.filter_factory = craton.api.middleware:KeystoneContextMiddleware.factory
+          [filter:request_id]
+          paste.filter_factory = oslo_middleware:RequestId.factory
+        dest: /etc/craton/craton-api-paste.ini
+
+    - name: Create craton venv
+      command: "virtualenv --always-copy --python=/usr/bin/python3.5 /opt/craton"
+      args:
+        creates: "/opt/craton/bin/python"
+
+    - name: Install craton
+      command: "pip install git+https://git.openstack.org/openstack/craton@master"
+      args:
+        creates: "/opt/craton/bin/python"
+
+    - name: create craton paste config
+      copy:
+        content: |
+          [Unit]
+          Description=glance openstack service
+          After=syslog.target
+          After=network.target
+          [Service]
+          Type=simple
+          User={{ craton_system_user_name }}
+          Group={{ craton_system_group_name }}
+          ExecStart=/opt/craton/bin/craton-api --config-file=/craton/etc/craton-api-conf --log-file=/var/log/craton/craton-api.log
+          TimeoutSec=300
+          Restart=on-failure
+          RestartSec=150
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/craton-api.service
+
+    - name: Reload the systemd daemon
+      command: "systemctl daemon-reload"
+
+    - name: Perform Craton DB sync
+      command: "/opt/craton/bin/craton-dbsync --config-file=/etc/craton/craton-api-conf upgrade"
+      become: yes
+      become_user: "{{ craton_system_user }}"
+      changed_when: false
+
+    - name: Start craton-api
+      service:
+        name: "craton-api"
+        state: "restarted"
